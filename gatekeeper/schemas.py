@@ -88,7 +88,10 @@ class Layout(BaseModel):
     result_criteria: list[ResultCriterion]
 
     def rows(self) -> list[tuple[str, str]]:
-        criteria = '\n'.join(f'{item.name} — {item.how_to_tell}' for item in self.result_criteria)
+        criteria = '\n'.join(
+            item.name if item.name == item.how_to_tell else f'{item.name} — {item.how_to_tell}'
+            for item in self.result_criteria
+        )
         return [
             ('Тематика', f'{self.theme_code} — {self.theme_title}'),
             ('Технология', self.technology),

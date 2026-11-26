@@ -6,7 +6,7 @@ from pathlib import Path
 from gatekeeper.catalogs import PROJECT_TYPES, THEMES
 from gatekeeper.compliance import rule_checks
 from gatekeeper.errors import GatekeeperError, RuleError
-from gatekeeper.parsing import extract_json, parse_layout
+from gatekeeper.parsing import extract_json, parse_comment, parse_layout
 from gatekeeper.prompts import classify_system
 from gatekeeper.schemas import CommentStatus, Phase, RuleStatus
 from gatekeeper.service import Gatekeeper
@@ -375,6 +375,76 @@ class GatekeeperRulesTest(unittest.TestCase):
         payload = _layout(project_types=['technological', 'research', 'creative', 'social'])
         with self.assertRaises(RuleError):
             parse_layout(extract_json(json.dumps(payload)))
+
+    def test_comment_accepts_criteria_written_as_lines(self) -> None:
+        accepted = {
+            'valid': True,
+            'concrete': True,
+            'reason': _REASON,
+            'abstraction_level': 12,
+            'questions': [],
+            'theme_code': '06',
+            'technology': 'сценарии заказчика и ответы о статусе доставки',
+            'project_types': ['technological', 'external_customer'],
+            'themes': ['чат-бот службы поддержки'],
+            'result_image': 'бот, принятый школой английского языка',
+            'result_criteria': [
+                'Ответы о доставке — бот отвечает на вопросы о статусе',
+                'Приёмка — заказчик принимает бота по своему чек-листу',
+            ],
+        }
+        model = _FakeModel([
+            json.dumps(_assessment(enough=True)),
+            json.dumps(accepted),
+            json.dumps(_roles()),
+        ])
+        gate = Gatekeeper(model)
+        gate.submit_description(
+            'Компания «Северная логистика» заказала чат-бота по своему чек-листу.',
+            _STARTER,
+        )
+        gate.submit_comment(
+            'Забыл сказать, что приложение заказала школа английского языка, которая сотрудничает с нашей кафедрой'
+        )
+        self.assertEqual(gate.comment_status, CommentStatus.ACCEPTED)
+        self.assertEqual(gate.final_layout.result_criteria[0].name, 'Ответы о доставке')
+        self.assertEqual(
+            gate.final_layout.result_criteria[0].how_to_tell,
+            'бот отвечает на вопросы о статусе',
+        )
+        self.assertEqual(gate.final_layout.result_criteria[1].name, 'Приёмка')
+        self.assertEqual(model.calls, 3)
+
+    def test_criteria_aliases_and_plain_phrase_are_accepted(self) -> None:
+        payload = _layout(result_criteria=[
+            {'название': 'Приёмка', 'описание': 'заказчик принимает бота по чек-листу'},
+            'бот отвечает на вопросы о статусе доставки',
+        ])
+        layout = parse_layout(extract_json(json.dumps(payload)))
+        self.assertEqual(layout.result_criteria[0].name, 'Приёмка')
+        self.assertEqual(layout.result_criteria[0].how_to_tell, 'заказчик принимает бота по чек-листу')
+        self.assertEqual(layout.result_criteria[1].name, 'бот отвечает на вопросы о статусе доставки')
+        self.assertEqual(layout.result_criteria[1].how_to_tell, layout.result_criteria[1].name)
+
+    def test_concrete_comment_keeps_previous_criteria_when_model_omits_them(self) -> None:
+        previous = parse_layout(extract_json(json.dumps(_layout())))
+        payload = {
+            'valid': True,
+            'concrete': True,
+            'reason': _REASON,
+            'abstraction_level': 10,
+            'questions': [],
+            'theme_code': previous.theme_code,
+            'technology': previous.technology,
+            'project_types': previous.project_types,
+            'themes': previous.themes,
+            'result_image': 'бот для школы английского языка',
+            'result_criteria': None,
+        }
+        _trace, layout, pending = parse_comment(payload, comment='школа заказала приложение', previous=previous)
+        self.assertFalse(pending)
+        self.assertEqual(layout.result_image, 'бот для школы английского языка')
+        self.assertEqual(layout.result_criteria, previous.result_criteria)
 
     def test_json_is_taken_from_think_block(self) -> None:
         raw = '<think>служебное</think>\n```json\n' + json.dumps(_layout()) + '\n```'

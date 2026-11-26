@@ -37,6 +37,9 @@ _EMPTY = frozenset({
     'null',
 })
 _THINK = re.compile(r'<think>.*?</think>', re.IGNORECASE | re.DOTALL)
+_CRITERION_SPLIT = re.compile(r'\s*[—–]\s*|\s+-\s+|\s*:\s+')
+_CRITERION_NAME_KEYS = ('name', 'title', 'criterion', 'название', 'имя')
+_CRITERION_HOW_KEYS = ('how_to_tell', 'how', 'description', 'как_заметить', 'описание')
 
 
 class _AssessmentBody(BaseModel):
@@ -226,6 +229,9 @@ def parse_comment(payload: dict[str, Any], *, comment: str, previous: Layout) ->
     if body.concrete:
         if questions:
             raise RuleError('при concrete=true список questions должен быть пустым')
+        criteria = body.result_criteria
+        if criteria is None:
+            criteria = [item.model_dump() for item in previous.result_criteria]
         layout = parse_layout(
             {
                 'theme_code': body.theme_code,
@@ -233,7 +239,7 @@ def parse_comment(payload: dict[str, Any], *, comment: str, previous: Layout) ->
                 'project_types': body.project_types,
                 'themes': body.themes,
                 'result_image': body.result_image,
-                'result_criteria': body.result_criteria,
+                'result_criteria': criteria,
             },
         )
         trace = CommentTrace(
@@ -361,14 +367,11 @@ def _criteria(value: Any, *, required: bool) -> list[ResultCriterion] | None:
     cleaned: list[ResultCriterion] = []
     seen: set[str] = set()
     for item in value:
-        if not isinstance(item, dict):
-            raise RuleError('критерий должен содержать name и how_to_tell')
-        name = _optional_text(str(item.get('name', '')), max_length=80)
-        how = _optional_text(str(item.get('how_to_tell', '')), max_length=240)
-        if name is None or how is None or name.casefold() in seen:
+        pair = _criterion_pair(item)
+        if pair is None or pair[0].casefold() in seen:
             continue
-        seen.add(name.casefold())
-        cleaned.append(ResultCriterion(name=name, how_to_tell=how))
+        seen.add(pair[0].casefold())
+        cleaned.append(ResultCriterion(name=pair[0], how_to_tell=pair[1]))
     if len(cleaned) > CRITERIA_MAX:
         cleaned = cleaned[:CRITERIA_MAX]
     if len(cleaned) < CRITERIA_MIN:
@@ -376,6 +379,69 @@ def _criteria(value: Any, *, required: bool) -> list[ResultCriterion] | None:
             raise RuleError(f'нужны от {CRITERIA_MIN} до {CRITERIA_MAX} критериев образа результата')
         return None
     return cleaned
+
+
+def _criterion_pair(item: Any) -> tuple[str, str] | None:
+    """Модель часто копирует критерий строкой «имя — как заметить» из текста расклада."""
+    if isinstance(item, str):
+        return _criterion_pair_from_text(item)
+    if not isinstance(item, dict):
+        raise RuleError('критерий должен содержать name и how_to_tell')
+    name = _criterion_field(item, _CRITERION_NAME_KEYS, max_length=80)
+    how = _criterion_field(item, _CRITERION_HOW_KEYS, max_length=240)
+    if name is not None and how is not None:
+        return name, how
+    if name is not None or how is not None or len(item) != 1:
+        return None
+    key, raw = next(iter(item.items()))
+    if isinstance(raw, (dict, list)):
+        return None
+    label = _optional_text(str(key), max_length=80)
+    detail = _optional_text(str(raw), max_length=240)
+    if label is None or detail is None:
+        return None
+    return label, detail
+
+
+def _criterion_pair_from_text(value: str) -> tuple[str, str] | None:
+    text = ' '.join(value.split())
+    if text.casefold() in _EMPTY:
+        return None
+    parts = _CRITERION_SPLIT.split(text, maxsplit=1)
+    if len(parts) == 2:
+        name = _clip_text(parts[0], max_length=80)
+        how = _clip_text(parts[1], max_length=240)
+        if name is None or how is None:
+            return None
+        return name, how
+    how = _clip_text(text, max_length=240)
+    if how is None:
+        return None
+    name = _clip_text(how, max_length=80)
+    if name is None:
+        return None
+    return name, how
+
+
+def _criterion_field(item: dict[str, Any], keys: tuple[str, ...], *, max_length: int) -> str | None:
+    wanted = {key.casefold() for key in keys}
+    for key, raw in item.items():
+        if str(key).casefold() not in wanted or isinstance(raw, (dict, list)):
+            continue
+        text = _optional_text(str(raw), max_length=max_length)
+        if text is not None:
+            return text
+    return None
+
+
+def _clip_text(value: str, *, max_length: int) -> str | None:
+    text = ' '.join(value.split())
+    if text.casefold() in _EMPTY:
+        return None
+    if len(text) <= max_length:
+        return text
+    clipped = text[:max_length].rsplit(' ', 1)[0].strip()
+    return clipped or text[:max_length]
 
 
 def _optional_theme(code: str | None) -> Any:
